@@ -8,14 +8,19 @@
 # GitHub: repo -> Settings -> Actions -> Runners -> New self-hosted runner (copy only the
 # value after --token). The token is typed here, never into a chat.
 #
+# No-typing mode (e.g. Oracle "initialization script" / cloud-init, runs as root):
+#   RUNNER_REPO=k00r0/gita-shorts RUNNER_TOKEN=xxxx bash runner-setup.sh
+#
 # Never attach this server to a PUBLIC repo: anyone could run code on it through a pull request.
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 say() { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mStopped: %s\033[0m\n' "$*"; exit 1; }
 
 command -v apt-get >/dev/null || die "this needs an Ubuntu server (create the instance with the Ubuntu 24.04 image)."
-[ "$(id -u)" -ne 0 ] || die "run it as the normal 'ubuntu' user, not root."
+if [ "$(id -u)" -eq 0 ] && [ -z "${RUNNER_TOKEN:-}" ]; then die "run it as the normal 'ubuntu' user, not root."; fi
+command -v sudo >/dev/null || die "sudo is missing."
 
 case "$(uname -m)" in
   aarch64|arm64) ARCH=arm64 ;;
@@ -23,17 +28,18 @@ case "$(uname -m)" in
   *) die "unknown CPU type $(uname -m)" ;;
 esac
 
-read -rp "GitHub repo (owner/name, e.g. k00r0/gita-shorts): " REPO
+REPO="${RUNNER_REPO:-}"; TOKEN="${RUNNER_TOKEN:-}"
+[ -n "$REPO" ] || read -rp "GitHub repo (owner/name, e.g. k00r0/gita-shorts): " REPO
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "that doesn't look like owner/name."
-read -rsp "Registration token (hidden while you paste): " TOKEN; echo
+[ -n "$TOKEN" ] || { read -rsp "Registration token (hidden while you paste): " TOKEN; echo; }
 [ -n "$TOKEN" ] || die "no token given."
 NAME="${REPO#*/}"
 DIR="/opt/actions-runner/$NAME"
 
 if [ ! -f /etc/gh-runner-base-done ]; then
   say "Installing the basics (5-10 minutes the first time)"
-  sudo apt-get update -q
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+  sudo apt-get -o DPkg::Lock::Timeout=900 update -q
+  sudo -E apt-get -o DPkg::Lock::Timeout=900 install -y -q \
     git curl jq unzip zip ffmpeg python3 python3-venv python3-pip \
     libraqm0 libfribidi0 libharfbuzz0b build-essential ca-certificates
 
@@ -63,7 +69,7 @@ if [ -f "$DIR/.runner" ]; then
 fi
 sudo mkdir -p "$DIR" && sudo chown runner:runner "$DIR"
 sudo -u runner bash -c "cd '$DIR' && curl -fsSL -o r.tgz https://github.com/actions/runner/releases/download/v$VER/actions-runner-linux-$ARCH-$VER.tar.gz && tar xzf r.tgz && rm r.tgz"
-sudo bash -c "cd '$DIR' && ./bin/installdependencies.sh" >/dev/null
+sudo bash -c "cd '$DIR' && ./bin/installdependencies.sh" >/dev/null || true
 
 say "Connecting to $REPO"
 sudo -u runner bash -c "cd '$DIR' && ./config.sh --unattended --replace \
@@ -73,4 +79,5 @@ sudo -u runner bash -c "cd '$DIR' && ./config.sh --unattended --replace \
 say "Starting it as a service (it restarts by itself after a reboot)"
 sudo bash -c "cd '$DIR' && ./svc.sh install runner && ./svc.sh start" >/dev/null
 
+echo "RUNNER SETUP OK $(date)" | sudo tee /var/log/runner-setup.ok >/dev/null
 say "Done. In GitHub: $REPO -> Settings -> Actions -> Runners should show 'oracle-$NAME' as Idle (green)."
